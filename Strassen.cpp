@@ -136,7 +136,7 @@ CALC_C_SUFFIX##S(z, unused, DIM);A += AS;C += CS;}
 #define MATR_T_PROD_FUNC(z, n, P) [](double *C,unsigned CS,double *A,unsigned AS,double *B,unsigned BS){GEN_MUL_BODY(n,P)}
 
 
-FSimpleMatrProd prod_funcs_t[] = { //prod_funcs_t[i] i=8..15 is function C=A*transp(B) for matrices ixi
+FSimpleMatrProd prod_funcs_t[] = { //prod_funcs_t[i] is function C=A*transp(B) for matrices ixi
     nullptr, 
     [](double *C,unsigned CS,double *A,unsigned AS,double *B,unsigned BS) { *C = A[0] * B[0]; },
     SMALL_MATR_T_PROD_FUNC(z, 2,),
@@ -157,7 +157,7 @@ FSimpleMatrProd prod_funcs_t[] = { //prod_funcs_t[i] i=8..15 is function C=A*tra
 };
 
 
-FSimpleMatrProd prod_funcs_p_t[] = {  //prod_funcs_p[i] i=8..15 is function C+=A*transp(B) for matrices ixi
+FSimpleMatrProd prod_funcs_p_t[] = {  //prod_funcs_p[i] is function C+=A*transp(B) for matrices ixi
     nullptr,
     [](double *C,unsigned CS,double *A,unsigned AS,double *B,unsigned BS) { *C += A[0] * B[0]; },
     SMALL_MATR_T_PROD_FUNC(z, 2,_P),
@@ -179,14 +179,9 @@ FSimpleMatrProd prod_funcs_p_t[] = {  //prod_funcs_p[i] i=8..15 is function C+=A
 
 #define COUNT_OF(x) ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
 template <typename T, std::size_t N>
-constexpr std::size_t count_of(T const (&)[N]) noexcept
-{
-    return N;
-}
+constexpr std::size_t count_of(T const (&)[N]) noexcept {return N;} 
 
-
-
-void get_num_calc(unsigned SZ, double (&num_calc)[12])
+ void get_num_calc(unsigned SZ, double (&num_calc)[12])
 {
     const unsigned small_matr_size = 130;
     for (unsigned i = 0; i < count_of(num_calc); i++)
@@ -443,7 +438,11 @@ void strassen_padding_calc(unsigned SZ, double *buf, double *C, unsigned CS, dou
 
 #ifdef _DEBUG
 double *buf_max;
+#define _SET_BUF_MAX(BM) buf_max = BM;
+#else
+#define _SET_BUF_MAX(BM)
 #endif
+
 
 void  strassen_recur_mul_by_transposed(unsigned SZ, double *buf, double *C00, unsigned CS, double *A00, unsigned AS, double *B00, unsigned BS)
 {
@@ -543,14 +542,6 @@ void transp(unsigned SZ, double *BT, unsigned BTS, double *B, unsigned BS)
         for (unsigned j = 0; j<SZ; j++)
             BT[j*BTS + i] = B[i*BS + j];
 }
-void transp_and_set_last_col_zero(unsigned SZ, double *BT, double *B, unsigned BS)
-{
-    for (unsigned i = 0; i<SZ - 1; i++)
-        for (unsigned j = 0; j<SZ; j++)
-            BT[j*SZ + i] = B[i*BS + j];
-    for (unsigned j = 1; j<SZ + 1; j++)
-        BT[j*SZ - 1] = 0;
-}
 
 
 
@@ -620,20 +611,6 @@ void  strassen_recur_inv_even(unsigned SZ, double *buf, double *I, unsigned IS, 
  
 }
 
-void copy_on(unsigned row_len, unsigned row_numb, double *T, unsigned TS, double *F, unsigned FS)  // copy submatrix row_len*row_numb from F to T
-{
-    auto nbytescopy = row_len * sizeof(T[0]);
-    for (auto T_end = T + TS*row_numb; T < T_end; T += TS, F += FS)  memcpy(T, F, nbytescopy);
-};
-
-void copy_and_change_sign(unsigned SZ, double *T, unsigned TS, double *F, unsigned FS)  // copy submatrix SZ*SZ from F to T and change sign
-{
-    auto T_delta = TS - SZ;
-    auto F_delta = FS - SZ;
-    for (auto T_last_row = T + SZ*TS; T < T_last_row; T += T_delta,F+=F_delta)
-        for (auto T_last_col = T + SZ; T < T_last_col; T++,F++)
-            *T = -*F;
-};
 
 void print_matrix(char *s, unsigned SZ, double *M, unsigned MS = 0);
 void print_matrix(char *s, int l, unsigned SZ, double *M, unsigned MS = 0);
@@ -789,11 +766,6 @@ bool small_matr_mul(unsigned SZ_, double *C_, double *A_, double *B_)
     return false;
 }
 
-#ifdef _DEBUG
-#define _SET_BUF_MAX buf_max = buf.get() + buf_size;
-#else
-#define _SET_BUF_MAX
-#endif
 
 void  strassen_mul(unsigned SZ_, double *C_, double *A_, double *B_, int enl=0)
 {
@@ -820,7 +792,7 @@ void  strassen_mul(unsigned SZ_, double *C_, double *A_, double *B_, int enl=0)
 	inplace_transpose(SZ, B);
   unsigned buf_size = (4 * SZ*SZ) / 3 + 1;
 	boost::scoped_array<double> buf(new double[buf_size]);
-  _SET_BUF_MAX;
+  _SET_BUF_MAX(buf.get()+buf_size);
 	strassen_recur_mul_by_transposed(SZ, buf.get(), C, SZ, A, SZ,  B, SZ);
 	if (SZ == SZ_)inplace_transpose(SZ, B);
 	else copy_on(C_,SZ_, C,SZ);
@@ -833,7 +805,7 @@ void  strassen_inv(unsigned SZ_, double *I_, double *A_, int enl = 0)
     auto *A = A_;
     unsigned buf_size = (4 * SZ*SZ) / 3 + 8 * SZ + 1;
     boost::scoped_array<double> buf(new double[buf_size]);
-    _SET_BUF_MAX;
+    _SET_BUF_MAX(buf.get()+buf_size);
     strassen_recur_inv(SZ, buf.get(), I, SZ, A, SZ);
 };
 
