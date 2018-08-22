@@ -2,6 +2,7 @@
 //
 
 //#include "stdafx.h"
+#include "fix_size_matrix_funcs.h"
 #include <stdio.h>
 #include <tchar.h>
 #include <time.h>
@@ -48,134 +49,6 @@ C21 ← U2 − P4
 C22 ← U2 + P5
 */
 
-#include <boost/preprocessor/repetition/repeat.hpp>
-#include <boost/preprocessor/control/if.hpp>
-#include <boost/preprocessor/arithmetic/mul.hpp>
-#include <boost/preprocessor/repetition/repeat_from_to.hpp>
-#include <boost/smart_ptr/scoped_array.hpp>
-#include <boost/preprocessor/punctuation/comma.hpp>
-#include <boost/preprocessor/arithmetic/mod.hpp>
-#include <boost/preprocessor/arithmetic/div.hpp>
-#include <boost/preprocessor/control/expr_if.hpp>
-
-typedef void (*FSimpleMatrProd)(double *, unsigned, double *, unsigned, double *, unsigned);
-
-#define IJ_MATR_ELEM(M,I,J) M[(I)*M##S+(J)]
-#define KTH_T_TERM(z, k, J_IDX) BOOST_PP_EXPR_IF(k,+) A[k]*B_[k]
-#define IJK_T_CYCLE_K(z,J_IDX,n) BOOST_PP_EXPR_IF(J_IDX,C++;B_+=BS;) *C=BOOST_PP_REPEAT_3RD(n,KTH_T_TERM,J_IDX);
-#define IJK_T_CYCLE_K_P(z,J_IDX,n) BOOST_PP_EXPR_IF(J_IDX,C++;B_+=BS;) *C+=BOOST_PP_REPEAT_3RD(n,KTH_T_TERM,J_IDX);
-
-#define IJK_T_CYCLE_J(z,I_IDX,n) BOOST_PP_EXPR_IF(I_IDX,C+=CS-n+1;A+=AS;) {auto B_=B;  BOOST_PP_REPEAT_2ND(n,IJK_T_CYCLE_K,n); }
-#define IJK_T_CYCLE_J_P(z,I_IDX,n) BOOST_PP_EXPR_IF(I_IDX,C+=CS-n+1;A+=AS;) {auto B_=B;  BOOST_PP_REPEAT_2ND(n,IJK_T_CYCLE_K_P,n); }
-
-#define MATR_T_PROD_FUNC_IJK(z,n,P) [](double *C,unsigned CS,double *A,unsigned AS,double *B,unsigned BS)\
-{ BOOST_PP_REPEAT_1ST(n,IJK_T_CYCLE_J##P,n)}
-
-
-
-#include <immintrin.h>
-
-#define BMATR_AVECT_PROD44(B_, A_reg, res_reg) 	 ymm0 = _mm256_loadu_pd(B_); ymm1 = _mm256_loadu_pd(B_ + BS); \
- ymm2 = _mm256_loadu_pd(B_ + 2 * BS); ymm3 = _mm256_loadu_pd(B_ + 3 * BS); \
- ymm0 = _mm256_mul_pd(ymm0, A_reg); ymm1 = _mm256_mul_pd(ymm1, A_reg); \
- ymm2 = _mm256_mul_pd(ymm2, A_reg); ymm3 = _mm256_mul_pd(ymm3, A_reg); \
- ymm0 = _mm256_hadd_pd(ymm0, ymm1); ymm1 = _mm256_hadd_pd(ymm2, ymm3); \
- ymm2 = _mm256_permute2f128_pd(ymm0, ymm1, 0x21); ymm3 = _mm256_blend_pd(ymm0, ymm1, 0xc); \
- res_reg = _mm256_add_pd(ymm2, ymm3);
-
-#define BM_AV_PROD4_(z,k,unused) BMATR_AVECT_PROD44(B_, Amm##k, ymm0);res = _mm256_add_pd(ymm0, res); B_ += 4;
-#define BM_AV_PROD4n(z,pref,n) BOOST_PP_IF(pref,B_ = B + pref *4* BS; C_ += 4;,auto *B_ = B;auto *C_ = C;); BMATR_AVECT_PROD44(B_, AmmF, res); B_ += 4; BOOST_PP_REPEAT_3RD(BOOST_PP_SUB(BOOST_PP_DIV(n,4),1), BM_AV_PROD4_,unused); _mm256_storeu_pd(C_, res);
-#define BM_AV_PROD4n_P(z,pref,n) BOOST_PP_IF(pref,B_ = B + pref *4* BS; C_ += 4;,auto *B_ = B;auto *C_ = C;); BMATR_AVECT_PROD44(B_, AmmF, res); B_ += 4; BOOST_PP_REPEAT_3RD(BOOST_PP_SUB(BOOST_PP_DIV(n,4),1), BM_AV_PROD4_,unused);\
-ymm1 = _mm256_loadu_pd(C_);res = _mm256_add_pd(res, ymm1); _mm256_storeu_pd(C_, res);
-
-
-#define KTH_TERM(z, k, unused) +A[k]*B_[k]
-#define SUF_SUM(z,DIM,unused) BOOST_PP_REPEAT_FROM_TO_3RD(BOOST_PP_SUB(DIM,BOOST_PP_MOD(DIM, 4)),DIM,KTH_TERM,unused)
-#define INC_C_(z,k,DIM) B_ = B+k*4*BS;C_[0]+=0 SUF_SUM(z,DIM,unused);B_+=BS;\
-C_[1]+=0 SUF_SUM(z,DIM,unused);B_+=BS;\
-C_[2]+=0 SUF_SUM(z,DIM,unused);B_+=BS;\
-C_[3]+=0 SUF_SUM(z,DIM,unused);
-
-#define INC_C(z,k,DIM) BOOST_PP_EXPR_IF(BOOST_PP_MOD(DIM, 4),INC_C_(z,k,DIM))
-
-#define SUF_SECTION(z,k,unused) ymm1 = _mm256_loadu_pd(B_ + 4*(1+k)); ymm1 = _mm256_mul_pd(ymm1, Amm##k); ymm0 = _mm256_hadd_pd(ymm0, ymm1);
-
-#define CALC_C_SUF_TERM(z,k,DIM) B_ = B +(DIM-DIM%4+k) * BS;\
-ymm0 = _mm256_loadu_pd(B_); ymm0 = _mm256_mul_pd(ymm0, AmmF); \
-BOOST_PP_REPEAT_3RD(BOOST_PP_SUB(BOOST_PP_DIV(DIM, 4),1), SUF_SECTION,unused)\
-ymm0 = _mm256_hadd_pd(ymm0, ymm0);C_[k] = ((double*)&ymm0)[0] + ((double*)&ymm0)[2] SUF_SUM(z,DIM,unused);
-
-#define CALC_C_SUF(z,k,DIM) C_ += 4; BOOST_PP_REPEAT_2ND(BOOST_PP_MOD(DIM, 4),CALC_C_SUF_TERM,DIM);
-
-
-
-#define CALC_C_SUF_TERM_P(z,k,DIM) B_ = B +(DIM-DIM%4+k) * BS;\
-ymm0 = _mm256_loadu_pd(B_); ymm0 = _mm256_mul_pd(ymm0, AmmF); \
-BOOST_PP_REPEAT_3RD(BOOST_PP_SUB(BOOST_PP_DIV(DIM, 4),1), SUF_SECTION,unused)\
-ymm0 = _mm256_hadd_pd(ymm0, ymm0);C_[k] += ((double*)&ymm0)[0] + ((double*)&ymm0)[2] SUF_SUM(z,DIM,unused);
-
-#define CALC_C_SUF_P(z,k,DIM) C_ += 4; BOOST_PP_REPEAT_2ND(BOOST_PP_MOD(DIM, 4),CALC_C_SUF_TERM_P,DIM);
-
-#define CALC_C_SUFFIX(z,k,DIM) BOOST_PP_EXPR_IF(BOOST_PP_MOD(DIM, 4),CALC_C_SUF(z,k,DIM))
-#define CALC_C_SUFFIX_P(z,k,DIM) BOOST_PP_EXPR_IF(BOOST_PP_MOD(DIM, 4),CALC_C_SUF_P(z,k,DIM))
-
-#define BM_AV_PROD_INC_C(z,n,DIM) BM_AV_PROD4n(z, n, DIM); INC_C(z, n, DIM);
-#define BM_AV_PROD_INC_C_P(z,n,DIM) BM_AV_PROD4n_P(z, n, DIM); INC_C(z, n, DIM);
-
-#define AMM_DECL(z,k,unused) __m256d Amm##k = _mm256_loadu_pd(A + 4*(1+k));
-
-#define GEN_MUL_BODY(DIM,S)	double *C_last_row = C + CS*DIM;while (C < C_last_row) {\
-__m256d ymm0, ymm1, ymm2, ymm3, res; __m256d AmmF = _mm256_loadu_pd(A);\
-BOOST_PP_REPEAT_1ST(BOOST_PP_SUB(BOOST_PP_DIV(DIM, 4),1),AMM_DECL,unused)\
-BOOST_PP_REPEAT_1ST(BOOST_PP_DIV(DIM, 4),BM_AV_PROD_INC_C##S,DIM)\
-CALC_C_SUFFIX##S(z, unused, DIM);A += AS;C += CS;}
-
-
-#define SMALL_MATR_T_PROD_FUNC(z, n, P) MATR_T_PROD_FUNC_IJK(z, n, P)
-//#define MATR_T_PROD_FUNC(z, n, P) MATR_T_PROD_FUNC_IJK(z, n, P)
-#define MATR_T_PROD_FUNC(z, n, P) [](double *C,unsigned CS,double *A,unsigned AS,double *B,unsigned BS){GEN_MUL_BODY(n,P)}
-
-
-FSimpleMatrProd prod_funcs_t[] = { //prod_funcs_t[i] is function C=A*transp(B) for matrices ixi
-    nullptr, 
-    [](double *C,unsigned CS,double *A,unsigned AS,double *B,unsigned BS) { *C = A[0] * B[0]; },
-    SMALL_MATR_T_PROD_FUNC(z, 2,),
-    SMALL_MATR_T_PROD_FUNC(z, 3,),
-    SMALL_MATR_T_PROD_FUNC(z, 4,),
-    SMALL_MATR_T_PROD_FUNC(z, 5,),
-    SMALL_MATR_T_PROD_FUNC(z, 6,),
-    SMALL_MATR_T_PROD_FUNC(z, 7,),
-    MATR_T_PROD_FUNC(z, 8,),
-    MATR_T_PROD_FUNC(z, 9,),
-    MATR_T_PROD_FUNC(z, 10,),
-    MATR_T_PROD_FUNC(z, 11,),
-    MATR_T_PROD_FUNC(z, 12,),
-    MATR_T_PROD_FUNC(z, 13,),
-    MATR_T_PROD_FUNC(z, 14,),
-    MATR_T_PROD_FUNC(z, 15,),
-    MATR_T_PROD_FUNC(z, 16,)
-};
-
-
-FSimpleMatrProd prod_funcs_p_t[] = {  //prod_funcs_p[i] is function C+=A*transp(B) for matrices ixi
-    nullptr,
-    [](double *C,unsigned CS,double *A,unsigned AS,double *B,unsigned BS) { *C += A[0] * B[0]; },
-    SMALL_MATR_T_PROD_FUNC(z, 2,_P),
-    SMALL_MATR_T_PROD_FUNC(z, 3,_P),
-    SMALL_MATR_T_PROD_FUNC(z, 4,_P),
-    SMALL_MATR_T_PROD_FUNC(z, 5,_P),
-    SMALL_MATR_T_PROD_FUNC(z, 6,_P),
-    SMALL_MATR_T_PROD_FUNC(z, 7,_P),
-    MATR_T_PROD_FUNC(z, 8, _P),
-    MATR_T_PROD_FUNC(z, 9, _P),
-    MATR_T_PROD_FUNC(z, 10, _P),
-    MATR_T_PROD_FUNC(z, 11, _P),
-    MATR_T_PROD_FUNC(z, 12, _P),
-    MATR_T_PROD_FUNC(z, 13, _P),
-    MATR_T_PROD_FUNC(z, 14, _P),
-    MATR_T_PROD_FUNC(z, 15, _P),
-    MATR_T_PROD_FUNC(z, 16,_P) 
-};
 
 #define COUNT_OF(x) ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
 template <typename T, std::size_t N>
@@ -448,7 +321,7 @@ void  strassen_recur_mul_by_transposed(unsigned SZ, double *buf, double *C00, un
 {
 	
 	if (SZ < 16){ 
-      prod_funcs_t[SZ](C00, CS, A00, AS, B00, BS); 
+      prod_funcs_t[SZ].multiply(C00, CS, A00, AS, B00, BS); 
   }
 	else{
 		
@@ -499,36 +372,6 @@ void  strassen_recur_mul_by_transposed(unsigned SZ, double *buf, double *C00, un
 	}
 }
 
-typedef void(*FSimpleInvFunc)(double *, unsigned, double *, unsigned);
-
-FSimpleInvFunc inv_funcs[] = {
-    nullptr,
-    [](double *I,unsigned IS,double *A,unsigned AS) {I[0] = 1 / A[0]; },
-    [](double *I,unsigned IS,double *A,unsigned AS) {
-        auto det = A[0] * A[AS + 1] - A[1] * A[AS]; 
-        I[0] = A[AS + 1] / det; I[1] = -A[1] / det; 
-        I[IS] = -A[AS] / det; I[IS + 1] = A[0] / det;
-    },
-    [](double *I,unsigned IS,double *M,unsigned MS) {
-        auto M1 = M + MS;
-        auto M2 = M1 + MS;
-        auto A = M1[1] * M2[2] - M1[2] * M2[1];
-        auto B = M1[2] * M2[0] - M1[0] * M2[2];
-        auto C = M1[0] * M2[1] - M1[1] * M2[0];
-        auto det_rev = 1 / (M[0] * A + M[1] * B + M[2] * C);
-        I[0] = det_rev*A;
-        I[1] = det_rev*(M[2] * M2[1] - M[1] * M2[2]);
-        I[2] = det_rev*(M[1] * M1[2] - M[2] * M1[1]);
-        I += IS;
-        I[0] = det_rev*B;
-        I[1] = det_rev*(M[0] * M2[2] - M[2] * M2[0]);
-        I[2] = det_rev*(M[2] * M1[0] - M[0] * M1[2]);
-        I += IS;
-        I[0] = det_rev*C;
-        I[1] = det_rev*(M[1] * M2[0] - M[0] * M2[1]);
-        I[2] = det_rev*(M[0] * M1[1] - M[1] * M1[0]);
-    }
-};
 
 void transp(unsigned SZ, double *BT, double *B, unsigned BS)
 {
@@ -758,7 +601,7 @@ bool small_matr_mul(unsigned SZ_, double *C_, double *A_, double *B_)
     if (SZ_ < count_of(prod_funcs_t)) {
         if (SZ_ > 0) {
             inplace_transpose(SZ_, B_);
-            prod_funcs_t[SZ_](C_, SZ_, A_, SZ_, B_, SZ_);
+            prod_funcs_t[SZ_].multiply(C_, SZ_, A_, SZ_, B_, SZ_);
             inplace_transpose(SZ_, B_);
         }
         return true;
@@ -843,8 +686,8 @@ void block_mul(unsigned SZ_,double *C_, double *A_, double *B_)
     }
     inplace_transpose(SZ,B);
  
-	FSimpleMatrProd f_t = prod_funcs_t[bs];
-	FSimpleMatrProd f_t_p = prod_funcs_p_t[bs];
+	FSimpleMatrProd f_t = prod_funcs_t[bs].multiply;
+	FSimpleMatrProd f_t_p = prod_funcs_t[bs].plus_multiply;
 
     for (unsigned i = 0; i<SZ; i += bs)
         for (unsigned j = 0; j < SZ; j += bs)
@@ -1019,7 +862,7 @@ void test_matrix_mul(unsigned bs)
     int n_repeats = 0;
 
     using namespace std::chrono;
-    FSimpleMatrProd mul = prod_funcs_t[bs];
+    FSimpleMatrProd mul = prod_funcs_t[bs].multiply;
     auto start = high_resolution_clock::now();
     for (unsigned k = 0; k<repeats; ++k)
         for (unsigned i = 0; i<matr_size-bs; i += bs)
