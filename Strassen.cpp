@@ -2,655 +2,33 @@
 //
 
 //#include "stdafx.h"
-#include "fix_size_matrix_funcs.h"
+#include "small_matr_funcs.h"
 #include <stdio.h>
 #include <tchar.h>
 #include <time.h>
 
 #include <iostream>
 #include <fstream>
-#include <random>
 #include <chrono>
+#include <boost/smart_ptr/scoped_array.hpp>
+#include "utils.h"
+#include "strassen_mul.h"
+#include "recur_inv.h"
+#include "base_operations.h"
 
 
 
 
-/*
-Strassen - Winograd algorithm has 15 additive (+-) matrix operation (original Strassen has 18)
-
-C11  C12     A11  A12     B11  B12
-          =            ×
-C21  C22     A21  A22     B21  B22
 
 
-S1 ← A21 + A22 
-S2 ← S1 − A11 
-S3 ← A11 − A21
-S4 ← A12 − S2
-T1 ← B12 − B11 
-T2 ← B22 − T1 
-T3 ← B22 − B12
-T4 ← T2 − B21
-
-P1 ← A11 × B11 
-P2 ← A12 × B21
-P3 ← S4 × B22 
-P4 ← A22 × T4
-P5 ← S1 × T1 
-P6 ← S2 × T2 
-P7 ← S3 × T3
-
-U1 ← P1 + P6
-U2 ← U1 + P7 
-U3 ← U1 + P5
-C11 ← P1 + P2
-C12 ← U3 + P3
-C21 ← U2 − P4 
-C22 ← U2 + P5
-*/
-
-
-#define COUNT_OF(x) ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
-template <typename T, std::size_t N>
-constexpr std::size_t count_of(T const (&)[N]) noexcept {return N;} 
-
- void get_num_calc(unsigned SZ, double (&num_calc)[12])
-{
-    const unsigned small_matr_size = 130;
-    for (unsigned i = 0; i < count_of(num_calc); i++)
-        num_calc[i]=0;
-    double &small_matr_strassen = num_calc[8], &small_matr_padding = num_calc[9];
-    double &big_matr_strassen = num_calc[10], &big_matr_padding = num_calc[11];
-    double n = 1;
-    while (SZ > small_matr_size) {
-        if (SZ % 2) {
-            big_matr_padding += n*SZ*SZ;
-            --SZ;
-        }
-        big_matr_strassen += n*SZ*SZ;
-        n *= 7;
-        SZ /= 2;
-    }
-    while (SZ >= 16) {
-        if (SZ % 2) {
-            small_matr_padding += n*SZ*SZ;
-            --SZ;
-        }
-        small_matr_strassen += n*SZ*SZ;
-        n *= 7;
-        SZ /= 2;
-    }
-    num_calc[SZ - 8] = n;
-};
-
-double get_weight(unsigned SZ, unsigned enlarge)
-{
-    //time in ns on my computer
-    /* const double op_wgts[] = { 1.088E+02,2.012E+02,2.789E+02,3.879E+02,      //to multiply 8x8,9x9,10x10,11x11 matrix
-    3.418E+02,5.112E+02,6.702E+02,8.304E+02,//to multiply 12x12,13x13,14x14,15x15 matrix
-    5.573E-01,1.238E+00,4.462E+00,1.361E+00 }; //to perform (per element) strassen additive small, padding small, strassen additive big, padding big
-    const double enlarge_per_el = 6.354;*/
-    const double op_wgts[] = { 1.088E+02,2.012E+02,2.789E+02,3.879E+02,      //to multiply 8x8,9x9,10x10,11x11 matrix
-    3.418E+02,5.112E+02,6.702E+02,8.304E+02,//to multiply 12x12,13x13,14x14,15x15 matrix
-        1.09E+00,1.33E+00,1.61E+00,1.97E+00 }; //to perform (per element) strassen additive small, padding small, strassen additive big, padding big
-    const double enlarge_per_el = 3.76;
-    SZ += enlarge;
-  double num_calc[12];
-  get_num_calc(SZ, num_calc);
-  double wgt = num_calc[0] * op_wgts[0];
-  for (unsigned i = 1; i < count_of(num_calc); i++)
-      wgt += num_calc[i] * op_wgts[i];
-  return wgt + (enlarge? enlarge_per_el*SZ*SZ : 0);
-};
-
-unsigned get_best_enl(unsigned SZ, unsigned range)
-{
-	double min_v = get_weight(SZ, 0);
-	unsigned min_e = 0;
-	for (unsigned i = 1; i < range; ++i){
-		double cur_v = get_weight(SZ, i);
-		if (cur_v < min_v)
-			{ min_v = cur_v; min_e = i; }
-	}
-	return min_e;
-};
-
-//SUM ------------------------------------------------------------------
-
-void  matrix_sum(unsigned sz, double *C, unsigned CS,  double *A, unsigned AS, double *B, unsigned BS)
-{
-	auto A_delta = AS - sz;
-	auto B_delta = BS - sz;
-	auto C_delta = CS - sz;
-	auto sz4 = sz % 4;
-	auto *C_last_row = C + CS*sz;
-	while (C < C_last_row){
-    auto C_last_col = C + (sz - sz4);
-		for (; C < C_last_col; A += 4, B += 4, C += 4){
-			__m256d ymm0 = _mm256_loadu_pd(A);
-			__m256d ymm1 = _mm256_loadu_pd(B);
-			ymm0=_mm256_add_pd(ymm0, ymm1);
-			_mm256_storeu_pd(C, ymm0);
-		}
-		for (C_last_col += sz4; C < C_last_col; ++A, ++B, ++C)
-			*C = *A + *B;
-		A += A_delta;
-		B += B_delta;
-		C += C_delta;
-	}
-}; 
-
-/*void  matrix_sum(unsigned sz, double *C, unsigned CS, double *A, unsigned AS, double *B, unsigned BS)
-{
-	double *C_last_col;
-	auto A_delta = AS - sz;
-	auto B_delta = BS - sz;
-	auto C_delta = CS - sz;
-	double *C_last_row = C + CS*sz;
-	while (C < C_last_row){
-		C_last_col = C + sz;
-		for (; C < C_last_col; ++A, ++B, ++C)
-			*C = *A + *B;
-		A += A_delta;
-		B += B_delta;
-		C += C_delta;
-	}
-};*/
-
-
-//SUB ------------------------------------------------------------------
-
-void  matrix_sub(unsigned sz, double *C, unsigned CS, double *A, unsigned AS, double *B, unsigned BS)
-{
-	auto A_delta = AS - sz;
-	auto B_delta = BS - sz;
-	auto C_delta = CS - sz;
-	auto sz4 = sz % 4;
-	auto *C_last_row = C + CS*sz;
-	while (C < C_last_row){ 
-    auto C_last_col = C + (sz - sz4);
-		for (; C < C_last_col; A += 4, B += 4, C += 4){
-			__m256d ymm0 = _mm256_loadu_pd(A);
-			__m256d ymm1 = _mm256_loadu_pd(B);
-			ymm0 = _mm256_sub_pd(ymm0, ymm1);
-			_mm256_storeu_pd(C, ymm0);
-		}
-		for (C_last_col += sz4; C < C_last_col; ++A, ++B, ++C)
-			*C = *A - *B;
-		A += A_delta;
-		B += B_delta;
-		C += C_delta;
-	}
-};
-
-
-/*void  matrix_sub(unsigned sz, double *C, unsigned CS, double *A, unsigned AS, double *B, unsigned BS)
-{
-	double *C_last_col;
-	auto A_delta = AS - sz;
-	auto B_delta = BS - sz;
-	auto C_delta = CS - sz;
-	double *C_last_row = C + CS*sz;
-	while (C < C_last_row){
-		C_last_col = C + sz;
-		for (; C < C_last_col; ++A, ++B, ++C)
-			*C = *A - *B;
-		A += A_delta;
-		B += B_delta;
-		C += C_delta;
-	}
-
-};
-
-*/
-
-
-void strassen_mul_suffix(unsigned sz, unsigned CS, double *C00, double *C01, double *C10, double *C11, double *S00, double *S01, double *S10)
-{
-	auto C_delta = CS - sz;
-	auto C_last_row = C00 + CS*sz;
-	auto sz4 = sz % 4;
-	while (C00 < C_last_row) {
-		for (auto C_last_col = C00 + (sz - sz4); C00 < C_last_col;C00+=4,C01+=4,C10+=4,C11+=4,S00+=4,S01+=4,S10+=4)
-		{  
-			__m256d ymm00 = _mm256_loadu_pd(C00);
-			__m256d ymm01 = _mm256_loadu_pd(C01);
-			__m256d ymm10 = _mm256_loadu_pd(C10);
-			__m256d ymm11 = _mm256_loadu_pd(C11);
-			__m256d zmm00 = _mm256_loadu_pd(S00);
-			__m256d zmm01 = _mm256_loadu_pd(S01);
-			__m256d zmm10 = _mm256_loadu_pd(S10);
-			ymm01 = _mm256_add_pd(ymm01,zmm00);
-			zmm10 = _mm256_add_pd(zmm10,ymm01);
-			ymm00 = _mm256_add_pd(zmm00,ymm00);
-			_mm256_storeu_pd(C00,ymm00);
-			ymm00 = _mm256_add_pd(ymm01,ymm11);
-			ymm00 = _mm256_sub_pd(ymm00,zmm01);
-			_mm256_storeu_pd(C01,ymm00);
-			ymm00 = _mm256_sub_pd(zmm10,ymm10);
-			_mm256_storeu_pd(C10,ymm00);
-			ymm00 = _mm256_add_pd(ymm11,zmm10);
-			_mm256_storeu_pd(C11,ymm00);
-		}
-	  for (auto C_last_col = C00 + sz4; C00 < C_last_col; ++C00, ++C01, ++C10, ++C11, ++S00, ++S01, ++S10)
-	  {
-		  *C01 += *S00;
-		  *S10 += *C01;
-		  *C00 += *S00;
-		  *C01 += *C11 - *S01;
-		  *C10 = *S10 - *C10;
-		  *C11 += *S10;
-	  }
-	  C00 += C_delta;
-		C01 += C_delta; 
-		C10 += C_delta;
-		C11 += C_delta;
-	}
-};
-
-void C_add_a_mul_B(unsigned sz, double *C, double a, double *B)
-{
-	//for (auto B_end = B + sz; B < B_end; ++B, ++C) *C += a*(*B);
-    double a_[] = { a,a };
-    __m256d amm = _mm256_broadcastsd_pd(_mm_loadu_pd(a_));
-    auto B_end = B + sz-sz%4;
-    while (B < B_end) {   
-        __m256d bmm = _mm256_mul_pd(_mm256_loadu_pd(B),amm);
-        __m256d cmm = _mm256_add_pd(_mm256_loadu_pd(C), bmm);
-        _mm256_storeu_pd(C, cmm);
-        B+=4; C+=4;
-    }
-    B_end += sz % 4;
-    while (B < B_end) *C++ += a*(*B++);
-};
-
-double vectA_mul_vectB(unsigned sz, double *A,  double *B)
-{
-/*	auto res = (*A)*(*B);
-	auto B_end = B + sz;
-	for (++A, ++B; B < B_end; ++A, ++B) res += (*A)*(*B);
-	return res;
- */ 
-  auto A_end = A + sz%4;
-  auto B_end = B + sz;
-  double res = 0;
-  while (A<A_end)   res += (*A++)*(*B++);
-  if (B >= B_end)return res;
-  __m256d smm = _mm256_mul_pd(_mm256_loadu_pd(A), _mm256_loadu_pd(B));
-  __m256d cmm;
-  A += 4; B += 4; 
-  while (B < B_end) {
-	    cmm = _mm256_mul_pd(_mm256_loadu_pd(A), _mm256_loadu_pd(B));
-      smm = _mm256_hadd_pd(smm, cmm);
-      A += 4; B += 4; 
-  }
-  smm = _mm256_hadd_pd(smm, smm);
-  return res+ ((double*)&smm)[0] + ((double*)&smm)[2];
-};
-
-void matrA_mul_vectB(unsigned sz, double *C, unsigned CS, double *A, unsigned AS, double *B)
-{
-    for (auto C_end=C+sz*CS; C < C_end; A += AS,C += CS)
-        *C = vectA_mul_vectB(sz, A, B);
-}
-
-void strassen_padding_calc(unsigned SZ, double *buf, double *C, unsigned CS, double *A, unsigned AS, double *B, unsigned BS)
-{
-	auto SZ_minus_one = SZ - 1;// LAST
-	//coping last column of B  (hereafter referred to as B[][LAST]) to buf
-	for (auto B_ = buf, B_end = buf + SZ_minus_one, B_cur_last = B + SZ_minus_one; B_ < B_end; ++B_, B_cur_last += BS)
-		*B_ = *B_cur_last;   //buf[]=B[][LAST]
-
-	for (auto B_ = B + SZ_minus_one*BS, C_end = C + CS*SZ_minus_one; C < C_end; C += CS, A += AS){
-    	C_add_a_mul_B(SZ_minus_one, C, A[SZ_minus_one], buf);   //C[I][] += A[I][LAST]*B[][LAST] 
-	    C[SZ_minus_one] = vectA_mul_vectB(SZ, A, B_);       // C[I][LAST]=A[i][]*B[LAST][], B[LAST][] is last row of B 
-	}
-	for (auto C_end =C + SZ; C < C_end; ++C, B += BS)*C = vectA_mul_vectB(SZ, A, B);// C[LAST][I]=A[LAST][]*B[i][]
-	
-};
-
-#ifdef _DEBUG
-double *buf_max;
-#define _SET_BUF_MAX(BM) buf_max = BM;
+#ifdef DIAGN_PRINT
+#define _PRN(M) print_matrix(#M,matr_size,M);
 #else
-#define _SET_BUF_MAX(BM)
+#define _PRN(M)
 #endif
 
 
-void  strassen_recur_mul_by_transposed(unsigned SZ, double *buf, double *C00, unsigned CS, double *A00, unsigned AS, double *B00, unsigned BS)
-{
-	
-	if (SZ < 16){ 
-      prod_funcs_t[SZ].multiply(C00, CS, A00, AS, B00, BS); 
-  }
-	else{
-		
-		auto sz = SZ / 2;
 
-    auto A01 = A00 + sz;
-		auto A10 = A00 + AS*sz;
-		auto A11 = A10 + sz;
-
-    auto C01 = C00 + sz;
-    auto C10 = C00 + CS*sz;
-    auto C11 = C10 + sz;
-
-		// B - transposed matrix!!
-		auto B01 = B00 + BS*sz;
-		auto B10 = B00 + sz;
-		auto B11 = B01 + sz;
-
-    // storage for temporary matrices
-		auto subm_size = sz*sz;
-		auto *S00 = buf; buf += subm_size;
-		auto *S01 = buf; buf += subm_size;
-		auto *S10 = buf; buf += subm_size;
-		auto *T00 = buf; buf += subm_size;
-    _ASSERT(buf<buf_max);
-
-
-		matrix_sum(sz, S00, sz, A10, AS, A11, AS);
-		matrix_sub(sz, T00, sz, B01, BS, B00, BS);
-		strassen_recur_mul_by_transposed(sz, buf, C11, CS, S00, sz, T00, sz);
-		matrix_sub(sz, T00, sz, B11, BS, T00, sz);
-		matrix_sub(sz, S00, sz, S00, sz, A00, AS);
-		strassen_recur_mul_by_transposed(sz, buf, C01, CS, S00, sz, T00, sz);
-		matrix_sub(sz, T00, sz, T00, sz, B10, BS);
-		matrix_sub(sz, S00, sz, S00, sz, A01, AS);
-		
-		strassen_recur_mul_by_transposed(sz, buf, S01, sz, S00, sz, B11, BS);
-		strassen_recur_mul_by_transposed(sz, buf, C10, CS, A11, AS, T00, sz);
-		matrix_sub(sz, T00, sz, B11, BS, B01, BS);
-		matrix_sub(sz, S00, sz, A00, AS, A10, AS);
-		
-		strassen_recur_mul_by_transposed(sz, buf, S10, sz, S00, sz, T00, sz);
-		strassen_recur_mul_by_transposed(sz, buf, S00, sz, A00, AS, B00, BS);
-		strassen_recur_mul_by_transposed(sz, buf, C00, CS, A01, AS, B10, BS);
-		strassen_mul_suffix(sz, CS, C00, C01, C10, C11, S00, S01, S10);
-		if (SZ % 2)
-			strassen_padding_calc(SZ, S00, C00, CS, A00, AS, B00, BS);
-	}
-}
-
-
-void transp(unsigned SZ, double *BT, double *B, unsigned BS)
-{
-    for (unsigned i = 0; i<SZ; i++)
-        for (unsigned j = 0; j<SZ; j++)
-            BT[j*SZ + i] = B[i*BS + j];
-}
-void transp(unsigned SZ, double *BT, unsigned BTS, double *B, unsigned BS)
-{
-    for (unsigned i = 0; i<SZ; i++)
-        for (unsigned j = 0; j<SZ; j++)
-            BT[j*BTS + i] = B[i*BS + j];
-}
-
-
-
-void strassen_transp_and_mul(unsigned SZ, double *buf, double *C, unsigned CS, double *A, unsigned AS, double *B, unsigned BS)  //
-{
-    auto *BT = buf; buf += SZ*SZ;
-    _ASSERT(buf<buf_max);
-    transp(SZ, BT, B, BS);
-    strassen_recur_mul_by_transposed(SZ, buf, C, CS, A, AS, BT, SZ);
-};
-
-
-void change_sign(unsigned SZ, double *M, unsigned MS)
-{
-    auto M_delta = MS - SZ;
-    for (auto M_last_row = M + SZ*MS; M < M_last_row; M+=M_delta) 
-        for (auto M_last_col = M + SZ; M < M_last_col; M++)
-            *M = -*M;
-    
-}
-
-void  strassen_recur_inv(unsigned SZ, double *buf, double *I, unsigned IS, double *A_, unsigned AS);
-
-void  strassen_recur_inv_even(unsigned SZ, double *buf, double *I, unsigned IS, double *A_, unsigned AS)
-{
-        auto sz = SZ / 2;
-        auto A = A_;
-        auto B = A + sz;
-        auto C = A + AS*sz;
-        auto D = C + sz;
-
-        auto I00 = I;
-        auto I01 = I00 + sz;
-        auto I10 = I00 + IS*sz;
-        auto I11 = I10 + sz;
-
-        /*
-
-
-        | I00  I01 |   | A   B | -1
-        |          | = |       |
-        | I10  I11 |   | C   D |
-        see https://en.wikipedia.org/wiki/Invertible_matrix#Blockwise_inversion for formulas
-        */
-
-        auto subm_size = sz*sz;
-
-        auto AI = buf; buf += subm_size;
-        strassen_recur_inv(sz, buf, AI, sz, A, AS); // AI - inverse A 
-        auto T1 = buf; buf += subm_size;
-        strassen_transp_and_mul(sz, buf, T1, sz, AI, sz, B, AS);
-        auto T2 = buf; buf += subm_size;
-        strassen_transp_and_mul(sz, buf, T2, sz, C, AS, T1, sz);
-        matrix_sub(sz, T2, sz,T2, sz, D, AS ); //T2=C*AI*B-D (T2=-Z where Z=D-C*AI*B)
-        strassen_recur_inv(sz, buf, I11, IS, T2, sz); //-ZI calculated and stored in I11
-        
-        strassen_transp_and_mul(sz, buf, I01, IS, T1, sz, I11, IS);  //I01=-AI*B*ZI
-        
-        transp(sz, T2, AI, sz); // T2=AIT
-        strassen_recur_mul_by_transposed(sz, buf, T1, sz, T2, sz, C, AS);  //T1=AIT*CT
-        
-        strassen_recur_mul_by_transposed(sz, buf, T2, sz, I01, IS, T1, sz); //T2=-AI*B*ZI*C*AI
-
-        matrix_sub(sz, I00, IS, AI, sz, T2, sz);  // I00=AI+AI*B*ZI*C*AI
-        strassen_recur_mul_by_transposed(sz, buf, I10, IS, I11, IS, T1, sz); // I10=-ZI*C*AI
-        change_sign(sz, I11, IS);  //I11 = ZI
- 
-}
-
-
-void print_matrix(char *s, unsigned SZ, double *M, unsigned MS = 0);
-void print_matrix(char *s, int l, unsigned SZ, double *M, unsigned MS = 0);
-    
-//#define _PRA(M)    if(SZ==5){print_matrix(#M,__LINE__,sz_A,M); getchar();}
-
-void  strassen_recur_inv_odd(unsigned SZ, double *buf, double *I, unsigned IS, double *A_, unsigned AS)
-{
-    auto sz_D = SZ / 2;
-    auto sz_A = SZ - sz_D; 
-    _ASSERT(sz_A==sz_D+1);
-
-    auto A = A_;
-    auto B_enlarged = A + sz_D; //enlarged B has additional first column from A and its  size is sz_A*sz_A instead sz_D*sz_A
-    auto C_enlarged = A + AS*sz_D;  //enlarged C has additional first row from A and its  size is sz_A*sz_A instead sz_A*sz_D
-    auto D_actual = C_enlarged +AS+ sz_A;   //  size sz_D*sz_D
-
-    auto I00 = I;
-    auto I01_enlarged = I00 + sz_D;  //enlarged I01 has additional first column from I00 and its  size is sz_A*sz_A 
-    auto I10_enlarged = I00 + IS*sz_D; //enlarged I10 has additional first row from I00 and its  size is sz_A*sz_A
-    auto I10_actual = I10_enlarged + IS;  //  size sz_A*sz_D
-    auto I11_enlarged = I10_enlarged + sz_D; //enlarged I11 has additional first row and first column from I10 and I01 and its  size is sz_A*sz_A
-    auto I11_actual = I10_actual + sz_A;  //  size sz_D*sz_D
-
- 
-
-//    | I00  I01 |   | A   B_enlarged | -1
-//    |          | = |       |
-//    | I10  I11 |   | C_enlarged   D |
-//    see https://en.wikipedia.org/wiki/Invertible_matrix#Blockwise_inversion for formulas
-
-    auto subm_size_A = sz_A*sz_A;
-    auto subm_size_D = sz_D*sz_D;
-    auto sz_A_bytes = sz_A * sizeof(A[0]);
-
-    auto AI = buf; buf += subm_size_A;
-    strassen_recur_inv(sz_A, buf, AI, sz_A, A, AS); // AI - inverse A 
-    //_PRA(AI);
-    auto AImulB = buf; buf += subm_size_A;   
-    
-    auto BT = buf; buf += subm_size_A;
-    transp(sz_A, BT, B_enlarged, AS);
-    //B_enlarged has  size sz_A*sz_A and  BT has actual size sz_A*sz_D, 
-    //so we need to make zero first BT row 
-    memset(BT, 0, sz_A_bytes);
-    //_PRA(BT);
-    strassen_recur_mul_by_transposed(sz_A, buf, AImulB, sz_A, AI, sz_A, BT, sz_A);
-
-    auto CmulAImulB = BT;
-
-    auto C_stored = buf; buf += sz_A;
-    // store first row of C_enlarged (last row of A) and make it zero
-    memcpy(C_stored,C_enlarged, sz_A_bytes);
-    memset(C_enlarged, 0, sz_A_bytes);
-    strassen_transp_and_mul(sz_A, buf, CmulAImulB, sz_A, C_enlarged, AS, AImulB, sz_A);
-    //_PRA(CmulAImulB);
-    auto sz_A_plus_one = sz_A + 1;
-    auto Z = CmulAImulB+ sz_A_plus_one;
-    
-    matrix_sub(sz_D, Z, sz_A, Z, sz_A, D_actual, AS); //Z=C_enlarged*AI*B_enlarged-D 
-
-    strassen_recur_inv(sz_D, buf, I11_actual, IS, Z, sz_A); //ZI calculated  and placed to I11
-
-    auto ZIT = CmulAImulB;
-    transp(sz_D, Z, sz_A, I11_actual, IS);   // ZIT - enlarged transposed ZI
-    //_PRA(ZIT);
-    strassen_recur_mul_by_transposed(sz_A, buf, I01_enlarged, IS, AImulB, sz_A, ZIT, sz_A);  //I01_enlarged=AI*B_enlarged*ZI_enlarged
-    
-    auto AIT = ZIT;
-    transp(sz_A, AIT, AI, sz_A);
-    auto T1 = AImulB;
-    strassen_recur_mul_by_transposed(sz_A, buf, T1, sz_A, AIT, sz_A, C_enlarged, AS);//T1=AIT*CT_enlarged
-    memcpy(C_enlarged, C_stored, sz_A_bytes); //restoring last row of A matrix (first row of C_enlarged)
-    _ASSERT(buf<buf_max);
-    buf -= sz_A;
-    //_PRA(T1);
-    auto T2 = AIT;
-    strassen_recur_mul_by_transposed(sz_A, buf, T2, sz_A, I01_enlarged, IS, T1, sz_A); //T2=-AI*B_enlarged*ZI*C_enlarged*AI
-    strassen_recur_mul_by_transposed(sz_D, buf, I10_actual+1, IS, I11_actual, IS, T1+ sz_A_plus_one, sz_A); // I10=ZI*C*AI
-    matrA_mul_vectB(sz_D, I10_actual, IS, I11_actual, IS, T1 + 1);  // I10=ZI*C*AI
-
-    change_sign(sz_D, I11_actual, IS);  //I11 = -ZI
-
-    matrix_sub(sz_A, I00, IS, AI, sz_A, T2, sz_A);  // I00=AI-AI*B_enlarged*ZI_enlarged*C_enlarged*AI
-}
-
-void  strassen_recur_inv(unsigned SZ, double *buf, double *I, unsigned IS, double *A_, unsigned AS)
-{
-    if (SZ < count_of(inv_funcs)) {
-        inv_funcs[SZ](I, IS, A_, AS);
-    }
-    else {
-        if (SZ % 2) 
-            strassen_recur_inv_odd(SZ, buf, I, IS, A_, AS);
-        else strassen_recur_inv_even(SZ, buf, I, IS, A_, AS);
-    }
-};
-
-
-
-void inplace_transpose(unsigned SZ, double *B)
-{
-    for (unsigned i = 0; i<SZ; i++)
-        for (unsigned j = i + 1; j<SZ; j++)
-        {
-            auto b = B[i*SZ + j];
-            B[i*SZ + j] = B[j*SZ + i];
-            B[j*SZ + i] = b;
-        }
-
-}
-
-double *enlarge_matrix(unsigned SZ, unsigned SZ_new, boost::scoped_array<double> &M_, double *M)
-{
-	M_.reset(new double[SZ_new*SZ_new]);
-	auto M_new = M_.get();
-	auto M_end = M + SZ*SZ;
-	auto nbytescopy = SZ * sizeof(M[0]);
-	auto nbyteszero = (SZ_new - SZ) * sizeof(M[0]);
-	auto nbytesall = nbytescopy + nbyteszero;
-
-	for (; M < M_end; M += SZ, M_new += SZ_new) {
-		memcpy(M_new, M, nbytescopy);
-		memset(M_new + SZ, 0, nbyteszero);
-	}
-	for (unsigned i = 0; i < SZ_new - SZ; i++, M_new += SZ_new) {
-		memset(M_new, 0, nbytesall);
-		M_new[SZ + i] = 1;
-	}
-
-
-	return M_.get();
-
-};
-
-void copy_on( double *M, unsigned SZ, double *M_src,unsigned SZ_src)
-{
-	auto nbytescopy = SZ * sizeof(M[0]);
-	for (auto M_end = M + SZ*SZ; M < M_end; M += SZ, M_src += SZ_src)  memcpy(M, M_src, nbytescopy);
-};
-
-
-bool small_matr_mul(unsigned SZ_, double *C_, double *A_, double *B_)
-{
-    if (SZ_ < count_of(prod_funcs_t)) {
-        if (SZ_ > 0) {
-            inplace_transpose(SZ_, B_);
-            prod_funcs_t[SZ_].multiply(C_, SZ_, A_, SZ_, B_, SZ_);
-            inplace_transpose(SZ_, B_);
-        }
-        return true;
-    }
-    return false;
-}
-
-
-void  strassen_mul(unsigned SZ_, double *C_, double *A_, double *B_, int enl=0)
-{
-  if (small_matr_mul(SZ_, C_, A_, B_))return;
-  //if positive enl is passed to the function - use it.
-  if(enl==0) enl = get_best_enl(SZ_, SZ_ / 3);  // find optimal matrix enlarge by default 
-  if (enl <0)enl = 0;     // if enl is negative don't change matrix size.
-	double *C, *A, *B;
-	auto SZ = SZ_;
-	boost::scoped_array<double> c, a, b;
-	if (enl) {
-		SZ = SZ_+enl;
-		c.reset(new double[SZ*SZ]);
-		C = c.get();
-		A = enlarge_matrix(SZ_, SZ, a, A_);
-		B = enlarge_matrix(SZ_, SZ, b, B_);
-	}
-	else
-	{
-		C = C_;
-		A = A_;
-		B = B_;
-	}
-	inplace_transpose(SZ, B);
-  unsigned buf_size = (4 * SZ*SZ) / 3 + 1;
-	boost::scoped_array<double> buf(new double[buf_size]);
-  _SET_BUF_MAX(buf.get()+buf_size);
-	strassen_recur_mul_by_transposed(SZ, buf.get(), C, SZ, A, SZ,  B, SZ);
-	if (SZ == SZ_)inplace_transpose(SZ, B);
-	else copy_on(C_,SZ_, C,SZ);
-};
-
-void  strassen_inv(unsigned SZ_, double *I_, double *A_, int enl = 0)
-{
-    auto SZ = SZ_;
-    auto *I=I_;
-    auto *A = A_;
-    unsigned buf_size = (4 * SZ*SZ) / 3 + 8 * SZ + 1;
-    boost::scoped_array<double> buf(new double[buf_size]);
-    _SET_BUF_MAX(buf.get()+buf_size);
-    strassen_recur_inv(SZ, buf.get(), I, SZ, A, SZ);
-};
 
 void simple_mul(unsigned SZ, double *C, double *A, double *B)
 {
@@ -664,76 +42,6 @@ void simple_mul(unsigned SZ, double *C, double *A, double *B)
    
 };
 
-void block_mul(unsigned SZ_,double *C_, double *A_, double *B_)
-{
-    if (small_matr_mul(SZ_, C_, A_, B_))return;
-    double *C, *A, *B;
-    auto SZ = SZ_;
-    boost::scoped_array<double> c, a, b;
-    const unsigned bs = 12;
-    if (SZ % bs) {
-        SZ = SZ_ - SZ_ % bs + bs;
-        c.reset(new double[SZ*SZ]);
-        C = c.get();
-        A = enlarge_matrix(SZ_, SZ, a, A_);
-        B = enlarge_matrix(SZ_, SZ, b, B_);
-    }
-    else
-    {
-        C = C_;
-        A = A_;
-        B = B_;
-    }
-    inplace_transpose(SZ,B);
- 
-	FSimpleMatrProd f_t = prod_funcs_t[bs].multiply;
-	FSimpleMatrProd f_t_p = prod_funcs_t[bs].plus_multiply;
-
-    for (unsigned i = 0; i<SZ; i += bs)
-        for (unsigned j = 0; j < SZ; j += bs)
-        {
-#define IJ_M_PTR(M,I,J) &M[I*SZ+J]
-            f_t(IJ_M_PTR(C, i, j), SZ, IJ_M_PTR(A, i, 0), SZ, IJ_M_PTR(B, j, 0), SZ);
-            for (unsigned k = bs; k<SZ; k += bs)
-                f_t_p(IJ_M_PTR(C, i, j), SZ, IJ_M_PTR(A, i, k), SZ, IJ_M_PTR(B, j, k), SZ);
-        }
-    if(SZ==SZ_)inplace_transpose(SZ,B);
-    else copy_on(C_,SZ_,C,SZ);
-
-
-}
-
-double matr_dif(unsigned SZ, double *A, double *B)
-{
-    double avr = 0;
-    double dif = fabs(A[0] - B[0]);
-    for (unsigned i = 0; i<SZ; ++i)
-        for (unsigned j = 0; j < SZ; ++j)
-        {
-            avr += fabs(A[i*SZ + j]) + fabs(B[i*SZ + j]);
-            double d = fabs(A[i*SZ + j] - B[i*SZ + j]);
-            if (d>dif)dif = d;
-        }
-    //if (avr == 0)return 0;
-    return 2 * (dif*SZ)*SZ / avr;
-};
-double matr_dif2(unsigned SZ, double *A, double *B)
-{
-    double avr = 0;
-    double dif = fabs(A[0] - B[0]);
-    double mx = fabs(A[0]) + fabs(B[0]);
-    for (unsigned i = 0; i<SZ; ++i)
-        for (unsigned j = 0; j < SZ; ++j)
-        {
-            //avr += fabs(A[i*SZ + j]) + fabs(B[i*SZ + j]);
-            double m= fabs(A[i*SZ + j]) + fabs(B[i*SZ + j]);
-            if (m > mx) mx = m;
-            double d = fabs(A[i*SZ + j] - B[i*SZ + j]);
-            if (d>dif) dif = d;
-        }
-    //if (avr == 0)return 0;
-    return 2 * dif / mx;
-};
 
 
 void print_matrix(char *s, unsigned SZ, double *M, unsigned MS)
@@ -763,13 +71,6 @@ void print_matrix(char *s, int l, unsigned SZ, double *M, unsigned MS)
 
 
 
-double randm()
-{
-    static   std::random_device generator;
-    //static   std::default_random_engine generator;
-    static   std::uniform_real_distribution<double> distribution(0.0, 1.0);
-    return distribution(generator);
-};
 
 void make_random(unsigned matr_size, double *M, unsigned MS = 0)
 {
@@ -812,18 +113,40 @@ void compare_strassen_block(unsigned matr_size)
     int n_repeats = 1;
     using namespace std::chrono;
     auto start = high_resolution_clock::now();
-    unsigned enl = get_best_enl(matr_size, matr_size / 2);
+    unsigned enl = get_best_enl(matr_size, matr_size / 3);
     _REPEAT strassen_mul(matr_size, ST, A, B,enl);
     double d_strassen=static_cast<duration<double>>(high_resolution_clock::now() - start).count();
 
     start = high_resolution_clock::now();
     _REPEAT block_mul(matr_size, BL, A, B);
     double d_block = static_cast<duration<double>>(high_resolution_clock::now() - start).count();
-    std::cout << "size=" << matr_size <<" size Str="<< matr_size + enl<< " repeats=" << n_repeats << " block t=" << d_block / n_repeats;
-    std::cout << " strassen t=" << d_strassen / n_repeats << " strassen p=" << get_weight(matr_size, enl)*1e-9;
+    std::cout << "size=" << matr_size <<" enlarge="<<  enl<< " repeats=" << n_repeats << " block t=" << d_block / n_repeats;
+    std::cout << " strassen t=" << d_strassen / n_repeats << " strassen predicted t=" << get_weight(matr_size, enl)*1e-9;
     std::cout << " diff=" << matr_dif(matr_size, BL, ST) << " ratio=" << d_block / d_strassen << "\n";
 
 };
+
+void compare_inv_strassen_mul(unsigned matr_size)
+{
+    ALLOC_RANDOM_MATR(A);
+    ALLOC_MATR(AI);
+    ALLOC_MATR(P);
+    ALLOC_MATR(E);
+    make_unit(matr_size, E);
+
+    using namespace std::chrono;
+    auto start = high_resolution_clock::now();
+    invert(matr_size, AI, A);
+    double d_inv = static_cast<duration<double>>(high_resolution_clock::now() - start).count();
+    
+    start = high_resolution_clock::now();
+    strassen_mul(matr_size, P, AI, A, -1);
+    double d_strassen = static_cast<duration<double>>(high_resolution_clock::now() - start).count();
+    std::cout << "size=" << matr_size <<" inverse t" << d_inv <<" strassen t=" << d_strassen;
+    std::cout << " diff E P " << matr_dif2(matr_size, E, P) << " ratio=" << d_inv / d_strassen << "\n";
+
+
+}
 
 void print_stat(unsigned SZ, double t, unsigned enl)
 {
@@ -835,8 +158,9 @@ void print_stat(unsigned SZ, double t, unsigned enl)
     std::cout << (enl ? SZ*SZ : 0) << "\t" << (enl ? 1 : 0) << "\n";
 };
 
-void strassen_stat(unsigned m_s, unsigned enl)
+void strassen_stat(unsigned m_s)
 {
+    unsigned enl = randm() * 7;
     unsigned matr_size = m_s - enl; 
     ALLOC_RANDOM_MATR(A);
     ALLOC_RANDOM_MATR(B);
@@ -851,9 +175,9 @@ void strassen_stat(unsigned m_s, unsigned enl)
 
 };
 
-void test_matrix_mul(unsigned bs)
+void test_small_matrix_mul(unsigned bs)
 {
-    if (bs < 8 || bs>15) { std::cout << "wrong input"; return;}
+    if (bs < 8 || bs>15) { std::cout << "wrong input, matrix size for this test must be 8..15"; return; }
     const unsigned repeats = 20000;
     unsigned matr_size = 350;
     ALLOC_RANDOM_MATR(A);
@@ -862,49 +186,24 @@ void test_matrix_mul(unsigned bs)
     int n_repeats = 0;
 
     using namespace std::chrono;
-    FSimpleMatrProd mul = prod_funcs_t[bs].multiply;
+    FSimpleMatrProd mul = get_mul_func(bs);
     auto start = high_resolution_clock::now();
     for (unsigned k = 0; k<repeats; ++k)
-        for (unsigned i = 0; i<matr_size-bs; i += bs)
-            for (unsigned j = 0; j<matr_size-bs; j += bs)
+        for (unsigned i = 0; i<matr_size - bs; i += bs)
+            for (unsigned j = 0; j<matr_size - bs; j += bs)
             {
-                mul(&C[i*matr_size+j], matr_size, &A[i*matr_size + j], matr_size, &B[i*matr_size + j], matr_size);
+                mul(&C[i*matr_size + j], matr_size, &A[i*matr_size + j], matr_size, &B[i*matr_size + j], matr_size);
                 ++n_repeats;
             }
     double d = static_cast<duration<double>>(high_resolution_clock::now() - start).count() / n_repeats;
-    std::cout <<  bs << "\t" << d << "\n";
+    std::cout << bs << "\t" << d << "\n";
 
 };
 
-#ifdef DIAGN_PRINT
-#define _PRN(M) print_matrix(#M,matr_size,M);
-#else
-#define _PRN(M)
-#endif
+void(*test_fucs[])(unsigned) = { compare_strassen_block , strassen_stat , compare_inv_strassen_mul,test_small_matrix_mul };
 
 int main(int argc, char* argv[])
 {
-  /*  auto matr_size = 7;
-    ALLOC_RANDOM_MATR(A);
-    ALLOC_MATR(AI);
-    ALLOC_MATR(P);
-    ALLOC_MATR(E);
-    //for (int i = 0; i < matr_size*matr_size; i++)A[i] = (i%5)+1;    
-    _PRN(A);
-
-    make_unit(matr_size, E);
-    strassen_inv(matr_size,AI,A);
-
-
-    strassen_mul(matr_size, P, AI, A,-1);
-    std::cout << matr_size<<"\n";
-    std::cout << "diff E P " << matr_dif2(matr_size, E, P) << "\n";
-
-    _PRN(AI);
-    _PRN( P);
-
-    getchar();
-    return 0; */
 
     /*    auto matr_size = 1024;
     ALLOC_RANDOM_MATR(A);
@@ -925,11 +224,21 @@ int main(int argc, char* argv[])
 
     const unsigned from_default = 200;
     const unsigned to_default = 4100;
+    const unsigned test_type_default = 0;
     unsigned from(from_default), to(to_default);
     bool wait = false;
-    bool stat = false;
+    unsigned test_type = test_type_default;
     if (argc == 1) { 
-        std::cout<<"usage: Strassen -fF -tT -w\n";
+        std::cout << "program prints statistics for different matrix multiplication and inversion tests\n";
+        std::cout << "usage: Strassen -fF -tT [-w] [-cC]\n";
+        std::cout << "matrix size iterates from F to T-1\n";
+        std::cout << "if -w presented programs gets stopped and waiting for 'enter' pressing before and after tests start\n";
+        std::cout << "C means test type; default value is 0\n";
+        std::cout << "  C==0 - compare block multiplication and Strassen\n";
+        std::cout << "  C==1 - Strassen multiplication statistics; number of different operations made during calculations\n";
+        std::cout << "  C==2 - recursive matrix inversion time compare to Strasssen multiplication time\n";
+        std::cout << "  C==3 - time to make multiplication for small matrix having size 8..15; F,T params mast be in 8..16\n";
+        return 0;
     }
     else {
         for (int i = 1; i<argc; i++)
@@ -962,20 +271,35 @@ int main(int argc, char* argv[])
                     wait = true;
                 }
                 break;
-                case 's':
+                case 'c':
                 {
-                    stat = true;
+                    test_type = atoi(argv[i] + 2);
+                    if (test_type>3)
+                    {
+                        test_type = test_type_default;
+                        std::cout << "Some error in -c param " << test_type_default << " used instead.\n";
+                    }
                 }
                 break;
                 }
             }
 
     }
+    if (test_type == 3) {
+        if (from < 8) {
+            from = 8;
+            std::cout << "Some error in F param for this test " << 8 << " used instead\n";
+        }
+        if (to > 16) {
+            to = 16;
+            std::cout << "Some error in T param for this test " << 16 << " used instead\n";
+        }
+    }
     if (from >= to) {
-        std::cout << "Somehow -f>=-t, to fix it -t is increased to -f+1\n";
+        std::cout << "Somehow F>=T, to fix it T is increased to F+1\n";
         to = from + 1;
     }
-  std::cout << "Finally command is\n Strassen -f"<<from<<" -t"<<to;
+    std::cout << "Finally command is\n Strassen -f"<<from<<" -t"<<to<<" -c"<<test_type;
   if (wait) std::cout << " -w\n"; else std::cout << "\n";
   if (wait)
   {
@@ -983,7 +307,8 @@ int main(int argc, char* argv[])
       getchar();
       std::cout << "wait...\n";
   }
-  for (unsigned i = from; i < to; i++)  if (stat) strassen_stat(i,randm()*7);else compare_strassen_block(i);
+  for (unsigned i = from; i < to; i++)  
+      test_fucs[test_type](i);
   //for (unsigned i = 8; i < 16; i++) test_matrix_mul(i);
   if (wait) getchar();
     return 0; 

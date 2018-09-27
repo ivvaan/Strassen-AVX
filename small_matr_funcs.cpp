@@ -1,20 +1,22 @@
-#pragma once
+#include "small_matr_funcs.h"
+#include "base_operations.h"
+#include "utils.h"
+
 #include <boost/preprocessor/repetition/repeat.hpp>
 #include <boost/preprocessor/control/if.hpp>
 #include <boost/preprocessor/arithmetic/mul.hpp>
 #include <boost/preprocessor/repetition/repeat_from_to.hpp>
-#include <boost/smart_ptr/scoped_array.hpp>
 #include <boost/preprocessor/punctuation/comma.hpp>
 #include <boost/preprocessor/arithmetic/mod.hpp>
 #include <boost/preprocessor/arithmetic/div.hpp>
 #include <boost/preprocessor/control/expr_if.hpp>
+#include <immintrin.h>
 
 
-typedef void(*FSimpleMatrProd)(double *, unsigned, double *, unsigned, double *, unsigned);
 
-struct fix_size_prod_funcs {
-    FSimpleMatrProd multiply, plus_multiply;
-};
+
+
+
 
 #define RESTRICTED_PTR __restrict
 //#define RESTRICTED_PTR 
@@ -34,7 +36,6 @@ struct fix_size_prod_funcs {
 
 
 
-#include <immintrin.h>
 
 #define BMATR_AVECT_PROD44(B_, A_reg, res_reg) 	 ymm0 = _mm256_loadu_pd(B_); ymm1 = _mm256_loadu_pd(B_ + BS); \
  ymm2 = _mm256_loadu_pd(B_ + 2 * BS); ymm3 = _mm256_loadu_pd(B_ + 3 * BS); \
@@ -99,8 +100,8 @@ CALC_C_SUFFIX##S(z, unused, DIM);A += AS;C += CS;}
 fix_size_prod_funcs prod_funcs_t[] = {
     //prod_funcs_t[i].multiply is function C=A*transp(B) for matrices ixi
     //prod_funcs_t[i].plus_multiply is function C+=A*transp(B) for matrices ixi
-    {nullptr, nullptr},
-    {[](double *C,unsigned,double *A,unsigned,double *B,unsigned) { *C = A[0] * B[0]; },[](double *C,unsigned,double *A,unsigned,double *B,unsigned) { *C += A[0] * B[0]; }},
+    { nullptr, nullptr },
+    { [](double *C,unsigned,double *A,unsigned,double *B,unsigned) { *C = A[0] * B[0]; },[](double *C,unsigned,double *A,unsigned,double *B,unsigned) { *C += A[0] * B[0]; } },
     SMALL_MATR_T_PROD_STRUCT(2),
     SMALL_MATR_T_PROD_STRUCT(3),
     SMALL_MATR_T_PROD_STRUCT(4),
@@ -118,35 +119,17 @@ fix_size_prod_funcs prod_funcs_t[] = {
     MATR_T_PROD_STRUCT(16)
 };
 
-
-typedef void(*FSimpleInvFunc)(double *, unsigned, double *, unsigned);
-
-FSimpleInvFunc inv_funcs[] = {
-    nullptr,
-    [](double *RESTRICTED_PTR I,unsigned IS,double *RESTRICTED_PTR A,unsigned AS) {I[0] = 1 / A[0]; },
-    [](double *RESTRICTED_PTR I,unsigned IS,double *RESTRICTED_PTR A,unsigned AS) {
-    auto det = A[0] * A[AS + 1] - A[1] * A[AS];
-    I[0] = A[AS + 1] / det; I[1] = -A[1] / det;
-    I[IS] = -A[AS] / det; I[IS + 1] = A[0] / det;
-    },
-    [](double *RESTRICTED_PTR I,unsigned IS,double *RESTRICTED_PTR M,unsigned MS) {
-        auto *RESTRICTED_PTR M1 = M + MS;
-        auto *RESTRICTED_PTR M2 = M1 + MS;
-        auto A = M1[1] * M2[2] - M1[2] * M2[1];
-        auto B = M1[2] * M2[0] - M1[0] * M2[2];
-        auto C = M1[0] * M2[1] - M1[1] * M2[0];
-        auto det_rev = 1 / (M[0] * A + M[1] * B + M[2] * C);
-        I[0] = det_rev*A;
-        I[1] = det_rev*(M[2] * M2[1] - M[1] * M2[2]);
-        I[2] = det_rev*(M[1] * M1[2] - M[2] * M1[1]);
-        I += IS;
-        I[0] = det_rev*B;
-        I[1] = det_rev*(M[0] * M2[2] - M[2] * M2[0]);
-        I[2] = det_rev*(M[2] * M1[0] - M[0] * M1[2]);
-        I += IS;
-        I[0] = det_rev*C;
-        I[1] = det_rev*(M[1] * M2[0] - M[0] * M2[1]);
-        I[2] = det_rev*(M[0] * M1[1] - M[1] * M1[0]);
+bool small_matr_mul(unsigned SZ_, double *C_, double *A_, double *B_)
+{
+    if (SZ_ < count_of(prod_funcs_t)) {
+        if (SZ_ > 0) {
+            inplace_transpose(SZ_, B_);
+            prod_funcs_t[SZ_].multiply(C_, SZ_, A_, SZ_, B_, SZ_);
+            inplace_transpose(SZ_, B_);
+        }
+        return true;
     }
-};
+    return false;
+}
+
 
